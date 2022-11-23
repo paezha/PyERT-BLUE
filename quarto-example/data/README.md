@@ -45,6 +45,13 @@ the data set and adapt it to the requirements of r5py’s documentation. Namely,
 - reprojected the data to "EPSG:4326", and
 - extracted centroids from the grid polygons (for the point data set)
 
+## sample-gps
+
+csv and gpx files with sample GPS data for a device tracked in the region of Burlington-Brampton in Ontario.
+
+## sample-osm
+
+osm.pbf file with OSM extract for Burlington-Brampton in Ontario.
 
 ## São Paulo
 

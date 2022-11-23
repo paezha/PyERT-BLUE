@@ -1,0 +1,166 @@
+---
+title: "Shortest Paths Example"
+author: "AP"
+format: html
+jupyter: python3
+execute: 
+  cache: true
+---
+
+## Setup
+
+Import the modules used in this notebook.
+```{python}
+import geopandas as gpd
+import igraph as ig
+#import itertools
+#import momepy
+import matplotlib.pyplot as plt
+#import networkx as nx
+import numpy as np
+import osmnx as ox
+import pandas as pd
+import pyrosm
+from scipy.spatial import cKDTree
+```
+
+## Data inputs
+
+### Network
+
+File path for an OSM dataset of Hamilton that I obtained the OSM pbf file from [BBBike](https://extract.bbbike.org/) on November 22, 2022:
+```{python}
+fp = "data/sample-osm/planet_-80.265,43.283_-79.276,43.734.osm.pbf"
+```
+
+Initialize the osm object using a bounding box corresponding to the Hamilton CMA:
+```{python}
+osm = pyrosm.OSM(fp)
+```
+
+Extract the network from the OSM object. It is possible to extract "driving", "all", "walking", etc.
+```{python}
+nodes, edges = osm.get_network(network_type = "driving", nodes = True)
+```
+
+Check the coordinate reference system of the objects (crs):
+```{python}
+nodes.crs
+edges.crs
+```
+
+The elements of the network (edges and nodes) are in EPSG 4019 (lat-long) and need to be projected:
+```{python}
+edges = edges.to_crs("EPSG:32617")
+nodes = nodes.to_crs("EPSG:32617")
+```
+
+Plot the network and zoning system:
+```{python}
+fig, ax = plt.subplots()
+ax.set_aspect('equal')
+# Edges
+edges.plot(ax=ax, color = "red")
+# Nodes
+nodes.plot(ax=ax, color = "white")
+# Show plot
+plt.show()
+```
+
+### Data Preparation
+
+Check the contents of the tables with the nodes and edges. In particular, we wish to see if there are columns with the speed and/or class of edge to calculate travel times on the network.
+
+We begin by checking the types of the columns:
+```{python}
+edges.dtypes
+```
+
+What is in the column "maxspeed"?
+```{python}
+edges["maxspeed"].unique()
+```
+
+"None" seems to indicate missing values.
+```{python}
+edges.loc[edges['maxspeed'] == "None"]["highway"].head(30)
+```
+
+It seems that "None"'s are missing values, so we probably cannot use this column for the speed. Instead, check the types of edges (column "highway"):
+```{python}
+edges["highway"].unique()
+```
+
+See @tbl-osm-speed-values. 
+
+Consult the [OSM wiki](https://wiki.openstreetmap.org/wiki/Key:highway) for the definitions of OSM values for the key "highway", and [Toronto's Road Classification](https://www.toronto.ca/wp-content/uploads/2018/01/950a-Road-Classification_Summary-Document.pdf) for likely equivalents in Ontario.
+
+Set the speeds of the following road types to a very small number:
+'services', 'pedestrian', 'turning_loop', 'track', 'rest_area', 'path', 'raceway', 'footway', 'cycleway', 'closed'.
+
+
+| OSM value                                                | Equivalent         | Speed      |
+|:---------------------------------------------------------|--------------------|------------|
+| 'motorway', 'primary', 'secondary'                       | Expressway         | 100 km/h   |
+| 'motorway_link', 'primary_link', 'secondary_link'        | Expressway         | 80 km/h    |
+| 'tertiary', 'trunk'                                      | Major Arterials    | 60 km/h    |
+| 'tertiary_link', 'trunk_link'                            | Major Arterials    | 50 km/h    |
+| 'residential', 'living_street', 'unclassified', 'road'   | Local              | 40 km/h    |
+
+: OSM highway values and proposed equivalent speeds {#tbl-osm-speed-values}
+
+Drop edges:
+```{python}
+edges = edges.drop(edges[(edges.highway == "service") | (edges.highway == "services") | (edges.highway == "pedestrian") | (edges.highway == "path") | (edges.highway == "footway") | (edges.highway == "cycleway") | (edges.highway == "raceway") | (edges.highway == "track") | (edges.highway == "turning_loop") | (edges.highway == "rest_area") | (edges.highway == "closed")].index)
+```       
+
+Initialize the speeds:
+```{python}
+edges = edges.assign(speed = 0.0)
+```
+
+Assign speeds depending on the highway value of the link:
+```{python}
+edges.loc[(edges["highway"] == "motorway") | (edges['highway'] == "primary") | (edges['highway'] == "secondary"), "speed"] = 100
+edges.loc[(edges["highway"] == "motorway_link") | (edges['highway'] == "primary_link") | (edges['highway'] == "secondary_link"), "speed"] = 80
+edges.loc[(edges["highway"] == "tertiary") | (edges['highway'] == "trunk"), "speed"] = 60
+edges.loc[(edges["highway"] == "tertiary_link") | (edges['highway'] == "trunk_link"), "speed"] = 50
+edges.loc[(edges["highway"] == "residential") | (edges['highway'] == "living_street") | (edges['highway'] == "unclassified")| (edges['highway'] == "road"), "speed"] = 40
+```
+
+Summary of speeds (there should not be any zeros):
+```{python}
+edges["speed"].describe()
+```
+
+Calculate the free flow travel time in minutes from the length of the link and the speed. The length of the link is in m and the speed is in km/h:
+```{python}
+
+edges["weight"] = 60 * (edges.length/1000)/edges.speed
+```
+
+Obtain a summary to make sure that there are no funny values for the weights (like inf or NAN):
+```{python}
+edges.weight.describe()
+```
+
+Convert the GeoDataFrames with the elements of the network to a {igraph} object:
+```{python}
+graph = osm.to_graph(nodes, edges, graph_type="igraph")
+```
+
+**IMPORTANT:** Some nodes will vanish after dropping some edges. Find which nodes are vertices in the graph:
+```{python}
+node_vertices = graph.vs["id"]
+node_vertices = nodes[nodes.id.isin(node_vertices)].reset_index()
+```
+
+**IMPORTANT:** The ids of the edges are not unique, but correspond instead to a group of segments that together make a street or a road; see:
+```{python}
+edges.id
+```
+
+These ids cannot be used to uniquely identify individual segments. The segments can be identified uniquely with their origin node and destination node (whose ids are unique).
+
+Once we converted the GeoDataFrame to a graph we can retrieve the origin and destination nodes of the segments along with their index in the graph.
+
