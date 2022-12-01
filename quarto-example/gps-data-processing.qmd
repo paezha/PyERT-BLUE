@@ -1,0 +1,236 @@
+---
+title: "GPS processing"
+format: html
+execute: 
+  freeze: true
+---
+
+In this notebook I work on processing GPS data.
+
+Load packages:
+```{python}
+#import csv
+#import gpxpy
+import datetime
+import geopandas as gp
+import matplotlib.pyplot as plt
+import pandas as pd
+import plotly.express as px
+import skmob
+from skmob.preprocessing import detection
+```
+
+
+## Read data
+
+Path to sample gps file (saved as csv):
+```{python}
+gps_fp = open("data/sample-gps/sample-gps-1.csv")
+```
+
+Read csv files as a pandas data frame and _remember to close the file after reading_:
+```{python}
+gps = pd.read_csv(gps_fp)
+gps_fp.close()
+```
+
+Convert gps trace to GeoDataFrame:
+```{python}
+gps = gp.GeoDataFrame(gps, geometry=gp.points_from_xy(gps.longitude, gps.latitude))
+```
+
+Check whether the gps GeoDataFrame has a coordinate reference system:
+```{python}
+gps.crs
+```
+
+Since it does not, set the crs (data are in long-lat, so use EPSG:4019):
+```{python}
+gps = gps.set_crs("EPSG:4019")
+```
+
+Verify that the GeoDataFrame now has a crs:
+```{python}
+gps.crs
+```
+
+Project to UTM Zone 17N (EPSG: 26917):
+```{python}
+gps = gps.to_crs("EPSG:26917")
+```
+
+Convert LocalTime to datetime and extract the coordinates of the waypoints:
+```{python}
+gps = gps.assign(LocalTime = pd.to_datetime(gps.LocalTime), x = gps.geometry.x, y = gps.geometry.y)
+```
+
+Calculate the time difference between the timestamp of the waypoint and 06:00:00 (6 am) of the day: 
+```{python}
+gps = gps.assign(time = (gps.LocalTime - datetime.datetime.strptime("2009-09-03 06:00:00","%Y-%m-%d %H:%M:%S")).astype('timedelta64[m]'))
+```
+
+Convert to TrajDataFrame to work with the skmob package:
+```{python}
+tdf = skmob.TrajDataFrame(gps, latitude='latitude', longitude = 'longitude',  datetime='LocalTime', user_id='SerialID')
+```
+
+Plot trajectory:
+```{python}
+tdf.plot_trajectory(zoom=12, weight=3, opacity=0.9, tiles='Stamen Toner')
+```
+
+Plot space-time path:
+```{python}
+fig = px.scatter_3d(gps, x = 'x', y = 'y', z = 'LocalTime',
+              color = 'time')
+fig.show()
+```
+
+Stop detection:
+```{python}
+# compute the stops for each individual in the TrajDataFrame
+stdf = detection.stay_locations(tdf, stop_radius_factor=0.5, minutes_for_a_stop=10.0, spatial_radius_km=0.2, leaving_time=True)
+# print a portion of the detected stops
+print(stdf.head())
+```
+
+Number of waypoints in trajectory and number of stops:
+```{python}
+print('Points of the original trajectory:\t%s'%len(tdf))
+n_stops = len(stdf)
+print('Number of stop episodes:\t\t\t%s'%n_stops)
+```
+
+Find min and max times for the trace (**IMPORTANT:** May need to do this by day?)
+```{python}
+# Extract date
+#date = (datetime.datetime.date(gps.LocalTime[1])).strftime("%Y-%m-%d")
+# Convert to datetime
+#min_time = datetime.datetime.strptime(date  + " 00:00:00","%Y-%m-%d %H:%M:%S")
+min_time = min(gps.LocalTime)
+#max_time = datetime.datetime.strptime(date  + " 23:59:59","%Y-%m-%d %H:%M:%S")
+max_time = max(gps.LocalTime)
+```
+
+Classify episodes:
+```{python}
+# Initialize episodes
+gps = gps.assign(episode = "")
+
+# initialize time for classification
+t0 = min(min_time, stdf.datetime[0])
+t1 = max(min_time, stdf.datetime[0])
+
+# Classify episodes based on stops
+for i in range(n_stops - 1):
+    print(i + 1)
+    print('Start of travel episode:\t%s'%(i+1), ' = ', datetime.datetime.strftime(t0, "%Y-%m-%d %H:%M:%S"))
+    print('End of travel episode:\t%s'%(i+1), ' = ', datetime.datetime.strftime(t1, "%Y-%m-%d %H:%M:%S"))
+    gps.loc[(gps["LocalTime"] > t0) & (gps["LocalTime"] < t1), "episode"] = "travel " + str(i + 1)
+    # Update time for classification
+    t0 = stdf.datetime[i]
+    t1 = stdf.leaving_datetime[i]
+    print('Start of stop episode:\t%s'%(i+1), ' = ', datetime.datetime.strftime(t0, "%Y-%m-%d %H:%M:%S"))
+    print('End of stop episode:\t%s'%(i+1), ' = ', datetime.datetime.strftime(t1, "%Y-%m-%d %H:%M:%S"))
+    gps.loc[(gps["LocalTime"] > t0) & (gps["LocalTime"] < t1), "episode"] = "stop " + str(i + 1)
+    # Update time for classification for next iteration
+    t0 = stdf.leaving_datetime[i]
+    t1 = stdf.datetime[i + 1]
+
+print(i + 2)
+print('Start of travel episode:\t%s'%(i+2), ' = ', datetime.datetime.strftime(t0, "%Y-%m-%d %H:%M:%S"))
+print('End of travel episode:\t%s'%(i+2), ' = ', datetime.datetime.strftime(t1, "%Y-%m-%d %H:%M:%S"))
+
+gps.loc[(gps["LocalTime"] > t0), "episode"] = "travel " + str(i + 2)
+
+```
+
+<!--
+s1 = tdf[(tdf['datetime'] > stdf.datetime[0]) & (tdf['datetime'] < stdf.leaving_datetime[0])]
+
+# Travel episode after first stop episode
+t2 = tdf[(tdf['datetime'] > stdf.leaving_datetime[0]) & (tdf['datetime'] < stdf.datetime[1])]
+
+
+
+Number of points before first stop:
+```{python}
+len(tdf[tdf['datetime'] < stdf.datetime[0]])
+```
+
+Waypoints between leaving time after stop 1 and before stop 2:
+```{python}
+len(tdf[tdf['datetime'] > stdf.leaving_datetime[0]][tdf['datetime'] < stdf.datetime[1]])
+```
+
+Waypoints after stop 2:
+```{python}
+len(tdf[tdf['datetime'] > stdf.leaving_datetime[1]])
+```
+
+Slice trajectory into travel episodes:
+```{python}
+# Travel episode before first stop episode
+t1 = tdf[tdf['datetime'] < stdf.datetime[0]]
+# Travel episode after first stop episode
+t2 = tdf[(tdf['datetime'] > stdf.leaving_datetime[0]) & (tdf['datetime'] < stdf.datetime[1])]
+# Travel episode after next (last) stop episode
+t3 = tdf[tdf['datetime'] > stdf.leaving_datetime[1]]
+```
+
+Slice trajectory into stop episodes:
+```{python}
+# First stop episodes
+s1 = tdf[(tdf['datetime'] > stdf.datetime[0]) & (tdf['datetime'] < stdf.leaving_datetime[0])]
+
+# Next (last) stop episode
+s1 = tdf[(tdf['datetime'] > stdf.datetime[0]) & (tdf['datetime'] < stdf.leaving_datetime[0])]
+```
+
+Plot first travel episode:
+```{python}
+t1.plot_trajectory(zoom=12, weight=3, opacity=0.9, tiles='Stamen Toner')
+```
+
+Plot second travel episode:
+```{python}
+t2.plot_trajectory(zoom=12, weight=3, opacity=0.9, tiles='Stamen Toner')
+```
+
+Plot third travel episode:
+```{python}
+t3.plot_trajectory(zoom=12, weight=3, opacity=0.9, tiles='Stamen Toner')
+```
+
+Plot space-time path:
+```{python}
+fig = px.scatter_3d(t3, x = 'x', y = 'y', z = 'time',
+              color = 'time')
+fig.show()
+```
+
+Initialize a column to label the episodes:
+```{python}
+gps = gps.assign(episode = "stop")
+```
+
+Label movement episodes:
+```{python}
+gps.loc[(gps["LocalTime"] < stdf.datetime[0]), "episode"] = "1"
+gps.loc[(gps["LocalTime"] > stdf.leaving_datetime[0]) & (gps["LocalTime"] < stdf.datetime[1]), "episode"] = "2"
+gps.loc[(gps["LocalTime"] > stdf.leaving_datetime[1]), "episode"] = "3"
+```
+
+Plot space-time path:
+```{python}
+fig = px.scatter_3d(gps.assign(size = 1), x = 'x', y = 'y', z = 'LocalTime', color = 'episode', symbol = "episode")
+
+fig.update_traces(marker=dict(size=3,
+                              line=dict(width=0,
+                                        color='DarkSlateGrey')),
+                  selector=dict(mode='markers'))
+
+fig.show()
+```
+
+-->
